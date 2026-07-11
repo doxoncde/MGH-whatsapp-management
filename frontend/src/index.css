@@ -1,0 +1,50 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  /* Overriding all slate colors to zinc to apply the Bento Grid aesthetic */
+  --color-slate-50: #fafafa;
+  --color-slate-100: #f4f4f5;
+  --color-slate-200: #e4e4e7;
+  --color-slate-300: #d4d4d8;
+  --color-slate-400: #a1a1aa;
+  --color-slate-500: #71717a;
+  --color-slate-600: #52525b;
+  --color-slate-700: #3f3f46;
+  --color-slate-800: #27272a;
+  --color-slate-850: #202024;
+  --color-slate-900: #18181b;
+  --color-slate-950: #09090b;
+
+  --color-brand-teal: #0d9488;
+  --color-brand-teal-dark: #0f766e;
+  --color-brand-teal-light: #2dd4bf;
+  --color-brand-gold: #ca8a04;
+  --color-brand-gold-dark: #854d0e;
+  --color-brand-gold-light: #fde047;
+  --color-brand-coral: #f43f5e;
+  --color-brand-coral-light: #fda4af;
+}
+
+/* Custom scrollbar styling for a polished dark theme dashboard */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #09090b; /* bg-slate-950 */
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a; /* bg-slate-800 */
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46; /* bg-slate-700 */
+}

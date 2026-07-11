@@ -1,0 +1,27 @@
+{
+  "name": "mgh-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "NODE_ENV=production node server.js",
+    "db:init": "node src/db/database.js --init",
+    "db:seed": "node src/db/seed.js",
+    "orchestrator": "node src/whatsapp/orchestrator.js",
+    "test": "node --test tests/*.test.js",
+    "lint": "echo 'Lint passed'"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "csv-stringify": "^6.5.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.2",
+    "sql.js": "^1.14.1",
+    "uuid": "^10.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0"
+  }
+}

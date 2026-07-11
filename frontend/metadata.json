@@ -1,0 +1,6 @@
+{
+  "name": "MGH Resort WhatsApp Management System",
+  "description": "An integrated WhatsApp management dashboard and CRM for MGH Resort, tracking bot interactions, customer records, promotional campaigns, team sales conversions, and system health.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
