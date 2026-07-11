@@ -7,6 +7,7 @@ import { pickMenu, pickBrochure, pickVideos, pickBoth, pickInvalid } from './eng
 import { logEvent, ensureCustomer } from '../services/eventLogger.js';
 import { calculateScore } from '../services/leadScorer.js';
 import { notifyNewLead, notifyHotLead } from '../services/notificationService.js';
+import { normalizePhone, isAdminCommand } from '../utils/phoneParser.js';
 
 const phones = new Map();
 const pendingAcks = new Map();
@@ -15,7 +16,6 @@ export function startOrchestrator(port = 9090) {
   const wss = new WebSocketServer({ port });
   
   wss.on('connection', (ws, req) => {
-    // Simple auth: first message must be auth token
     let authenticated = false;
     let phoneId = null;
     
@@ -38,6 +38,10 @@ export function startOrchestrator(port = 9090) {
         
         if (msg.type === 'whatsapp_message') {
           await handleIncomingMessage(phoneId, msg.payload, ws);
+        }
+
+        if (msg.type === 'incoming_call') {
+          await handleIncomingCall(phoneId, msg.payload, ws);
         }
         
         if (msg.type === 'ack') {
@@ -66,7 +70,14 @@ export function startOrchestrator(port = 9090) {
 
 async function handleIncomingMessage(phoneId, payload, ws) {
   const { sender, message, senderName } = payload;
-  
+
+  // --- ADMIN COMMAND CHECK ---
+  const adminCmd = isAdminCommand(message);
+  if (adminCmd) {
+    await handleAdminCommand(adminCmd, sender, ws);
+    return;
+  }
+
   // Log and ensure customer record
   const customer = ensureCustomer(sender, senderName);
   logEvent({ phone: sender, customerId: customer.id, eventType: 'conversation_started' });
@@ -76,19 +87,16 @@ async function handleIncomingMessage(phoneId, payload, ws) {
     await notifyNewLead(customer.name || senderName || 'Unknown', customer.phone_hash || '', message);
   }
   
-  const state = 'awaiting_choice'; // simplified for MVP — always treat as new interaction
+  const state = 'awaiting_choice';
   
   // Idle behavior
   const behavior = selectBehavior();
   if (behavior !== 'normalReply') {
     const commands = getBehaviorCommands(behavior);
-    // Simulate idle behavior (simplified — just log it)
     logEvent({ phone: sender, customerId: customer.id, eventType: 'idle_behavior', eventData: { behavior }, actor: 'bot' });
   }
   
   let replyText;
-  
-  // Match message to action
   const trimmed = (message || '').trim();
   
   if (state === 'awaiting_choice' || !customer.last_contact_date) {
@@ -105,29 +113,24 @@ async function handleIncomingMessage(phoneId, payload, ws) {
       logEvent({ phone: sender, customerId: customer.id, eventType: 'both_requested' });
       logEvent({ phone: sender, eventType: 'both_sent', actor: 'bot' });
     } else if (/price|rate|cost|₹|rs/i.test(trimmed)) {
-      replyText = pickMenu(); // Show menu as fallback for price inquiries
+      replyText = pickMenu();
       logEvent({ phone: sender, customerId: customer.id, eventType: 'price_inquiry' });
       await notifyHotLead(customer.name, customer.phone_hash, trimmed);
     } else if (/date|book|check.?in|available/i.test(trimmed)) {
-      replyText = pickMenu(); // Show menu
+      replyText = pickMenu();
       logEvent({ phone: sender, customerId: customer.id, eventType: 'dates_provided' });
       await notifyHotLead(customer.name, customer.phone_hash, trimmed);
     } else if (!/^[0-9１-３]+$/.test(trimmed) && trimmed.length > 2) {
-      replyText = pickMenu(); // Unrecognized query → show menu
+      replyText = pickMenu();
       logEvent({ phone: sender, customerId: customer.id, eventType: 'customer_question' });
     } else {
-      replyText = pickMenu(); // Default: show menu (new conversation or unrecognized)
+      replyText = pickMenu();
       logEvent({ phone: sender, customerId: customer.id, eventType: 'menu_sent' });
     }
   }
   
-  // Calculate lead score
   calculateScore(customer.id);
-  
-  // Calculate delay
   const delay = calculateDelay('short');
-  
-  // Build command sequence
   const typing = buildTypeCommand(replyText);
   const commandId = `cmd_${Date.now()}`;
   
@@ -137,20 +140,84 @@ async function handleIncomingMessage(phoneId, payload, ws) {
     payload: { recipient: sender, text: replyText, typingDelayMs: typing.totalDelayMs },
   };
   
-  // Send to phone
   if (ws.readyState === 1) {
     await sleep(delay);
     ws.send(JSON.stringify(cmd));
   }
 }
 
+// --- Admin Commands ---
+async function handleAdminCommand(cmd, sender, ws) {
+  console.log(`[Orchestrator] Admin command from ${sender}:`, cmd.command);
+
+  if (cmd.command === 'send_details') {
+    const result = normalizePhone(cmd.phoneRaw);
+
+    if (!result.valid) {
+      sendToPhone(sender, `❌ Invalid phone number: "${cmd.phoneRaw}". ${result.error}`);
+      return;
+    }
+
+    const menuText = pickMenu();
+    sendToPhone(result.normalized, menuText);
+
+    // Confirm to admin
+    sendToPhone(sender, `✅ Menu sent to ${result.normalized}${result.isIndian ? ' (India)' : ' (International)'}`);
+    console.log(`[Orchestrator] SD: Sent menu to ${result.normalized}`);
+  }
+
+  if (cmd.command === 'status') {
+    const uptime = process.uptime();
+    const mins = Math.floor(uptime / 60);
+    const hrs = Math.floor(mins / 60);
+    const statusMsg = `✅ Bot Status:\n• Uptime: ${hrs}h ${mins % 60}m\n• Connected phones: ${phones.size}\n• Port: 9090`;
+    sendToPhone(sender, statusMsg);
+  }
+}
+
+// --- Incoming Call Handler ---
+async function handleIncomingCall(phoneId, payload, ws) {
+  const { number, timestamp } = payload;
+  console.log(`[Orchestrator] Incoming call from: ${number}`);
+
+  // Notify admin
+  const adminNumber = config.adminWhatsapp;
+  if (adminNumber) {
+    sendToPhone(adminNumber, `📞 Incoming call from ${number}`);
+  }
+
+  // Trigger IVR sequence on the phone
+  if (ws.readyState === 1) {
+    const ivrCmd = {
+      type: 'command',
+      id: `ivr_${Date.now()}`,
+      action: 'ivr_sequence',
+      payload: {
+        filepath: '/data/local/tmp/mgh-greeting.wav',
+      },
+    };
+    ws.send(JSON.stringify(ivrCmd));
+
+    // After IVR completes (greeting + hangup), send WhatsApp menu
+    await sleep(15000); // Wait for full IVR sequence
+
+    const menuText = pickMenu();
+    sendToPhone(number, menuText);
+    console.log(`[Orchestrator] IVR complete — menu sent to ${number}`);
+
+    if (adminNumber) {
+      sendToPhone(adminNumber, `✅ IVR completed for ${number}. Menu sent via WhatsApp.`);
+    }
+  }
+}
+
 export function sendToPhone(recipient, text) {
-  // Send notification to admin via any connected phone
   for (const [id, ws] of phones) {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'command',
-        id: `notif_${Date.now()}`,
+        id: `msg_${Date.now()}`,
+        action: 'send_message',
         payload: { recipient, text },
       }));
       break;
