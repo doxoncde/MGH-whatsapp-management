@@ -1,0 +1,28 @@
+name = "mgh-bot"
+main = "src/worker.ts"
+compatibility_date = "2025-07-11"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "ORCHESTRATOR"
+class_name = "OrchestratorDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OrchestratorDO"]
+
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+[env.production.vars]
+API_TOKEN = "mgh-dashboard-secret-token-change-me"
+PHONE_AUTH_TOKEN = "phone-secret-token-change-me"
+ADMIN_WHATSAPP = "+919876543210"
+DEFAULT_COUNTRY_CODE = "91"
+DATABASE_URL = ""
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
+
+[dev]
+port = 8787
