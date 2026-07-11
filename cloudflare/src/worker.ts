@@ -319,14 +319,32 @@ app.get("/api/export/csv", async (c) => {
 
 // --- DO WebSocket routing ---
 
-// The Worker doesn't handle WebSocket — the DO does directly
-// This endpoint just validates and passes through
-app.get("/ws/connect", async (c) => {
+// Upgrade WebSocket connections and route to DO
+app.get("/ws", async (c) => {
   const upgradeHeader = c.req.header("Upgrade");
   if (!upgradeHeader || upgradeHeader !== "websocket") {
-    return c.json({ error: true, message: "Expected WebSocket upgrade" }, 400);
+    return c.json({ error: true, message: "Expected WebSocket Upgrade header" }, 400);
   }
-  return new Response("WS endpoint reached", { status: 200 });
+
+  // Route the WebSocket to the Orchestrator Durable Object
+  const id = (c.env as any).ORCHESTRATOR.idFromName("mgh-phone");
+  const stub = (c.env as any).ORCHESTRATOR.get(id);
+
+  // The DO's fetch handles the WebSocket upgrade internally
+  return stub.fetch(c.req.raw);
+});
+
+// Health check for DO (used by dashboard)
+app.get("/ws/health", async (c) => {
+  try {
+    const id = (c.env as any).ORCHESTRATOR.idFromName("mgh-phone");
+    const stub = (c.env as any).ORCHESTRATOR.get(id);
+    const doRes = await stub.fetch(new Request("https://orchestrator-dummy/health"));
+    const data: any = await doRes.json();
+    return c.json(data);
+  } catch (e: any) {
+    return c.json({ phoneConnected: false, error: e.message });
+  }
 });
 
 // --- 404 ---
