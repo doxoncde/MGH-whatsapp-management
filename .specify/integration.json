@@ -1,0 +1,15 @@
+{
+  "version": "0.12.12.dev0",
+  "integration_state_schema": 1,
+  "installed_integrations": [
+    "cmdc"
+  ],
+  "integration_settings": {
+    "cmdc": {
+      "script": "sh",
+      "invoke_separator": "-"
+    }
+  },
+  "integration": "cmdc",
+  "default_integration": "cmdc"
+}

@@ -1,0 +1,18 @@
+--- a/integrations/catalog.json
++++ b/integrations/catalog.json
+@@ -23,6 +23,13 @@
+       "repository": "https://github.com/github/spec-kit",
+       "tags": ["cli"]
+     },
++    "cmdc": {
++      "id": "cmdc",
++      "name": "Command Code",
++      "version": "1.0.0",
++      "description": "Command Code CLI skills-based integration",
++      "author": "spec-kit-core",
++      "repository": "https://github.com/github/spec-kit",
++      "tags": ["cli", "skills"]
++    },
+     "codebuddy": {
+       "id": "codebuddy",
+       "name": "CodeBuddy",
