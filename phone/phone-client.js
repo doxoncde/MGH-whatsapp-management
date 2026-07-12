@@ -17,7 +17,7 @@ const VM_URL = process.env.VM_URL || 'ws://localhost:9090';
 const AUTH_TOKEN = process.env.PHONE_AUTH_TOKEN || 'phone-secret-token';
 const RECONNECT_DELAY = 5000;
 const POLL_INTERVAL = 2000;
-const CALL_POLL_INTERVAL = 3000;
+const CALL_POLL_INTERVAL = 1000; // 1s — fast enough to catch quick state transitions
 
 // Device-calibrated coordinates (measured with Pointer Location)
 const SEND_BUTTON_X = 1000;
@@ -81,8 +81,11 @@ async function sleep(ms) {
 
 function sh(cmd) {
   try {
-    console.log(`[Phone] $ sudo ${cmd}`);
-    return execSync(`sudo ${cmd}`, { timeout: 15000, encoding: 'utf8' });
+    // Use absolute path to tsu (Termux root) so it works from PM2 background context
+    // 'sudo' is a Termux alias that may not resolve in PM2's shell
+    const tsu = '/data/data/com.termux/files/usr/bin/tsu';
+    console.log(`[Phone] $ ${cmd}`);
+    return execSync(`${tsu} -c "${cmd.replace(/"/g, '\\"')}"`, { timeout: 15000, encoding: 'utf8' });
   } catch (e) {
     console.error(`[Phone] Command failed: ${cmd} — ${e.message}`);
     return '';
@@ -354,7 +357,6 @@ function startCallListener() {
           lastCallNumber = incomingNumber;
           lastCallTime = Date.now();
           console.log(`[Phone] 📞 Ringing from: ${incomingNumber} — waiting for answer...`);
-          // Notify Cloudflare about incoming call (for logging/CRM)
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
               type: 'incoming_call',
@@ -362,14 +364,15 @@ function startCallListener() {
             }));
           }
         }
-      } else if (lastCallState === 1 && callState === 2) {
-        // RINGING → OFFHOOK: call was answered (by auto-answer or user)
-        if (lastCallNumber && !callInProgress) {
-          console.log(`[Phone] ✅ Call answered — triggering IVR audio for: ${lastCallNumber}`);
-          commandQueue.add(() => handleCallAnswered(lastCallNumber));
+      } else if (callState === 2 && lastCallState !== 2) {
+        // ANY state → OFFHOOK: call is now live (handles 0→2 fast transitions too)
+        const number = lastCallNumber || incomingNumber;
+        if (number && !callInProgress && !isDuplicateCall(number)) {
+          console.log(`[Phone] ✅ Call OFFHOOK — triggering IVR for: ${number}`);
+          commandQueue.add(() => handleCallAnswered(number));
         }
       } else if (callState === 0 && lastCallState !== 0) {
-        // → IDLE: call ended externally (caller hung up before audio)
+        // → IDLE: call ended
         callInProgress = false;
         console.log('[Phone] 📴 Call ended externally');
       }
