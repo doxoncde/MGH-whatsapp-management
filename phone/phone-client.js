@@ -378,7 +378,9 @@ function startCallListener() {
         }
       } else if (callState === 2 && lastCallState !== 2) {
         // ANY state → OFFHOOK: call is now live
-        if (!callInProgress && (Date.now() - lastCallTime < 60000)) {
+        // Note: We don't check lastCallTime here because some ROMs (or if phone is silent)
+        // jump directly from IDLE to OFFHOOK without ever hitting RINGTONE state.
+        if (!callInProgress) {
           console.log(`[Phone] ✅ Call OFFHOOK — triggering IVR`);
           commandQueue.add(() => handleCallAnswered('Unknown'));
         }
