@@ -15,11 +15,12 @@ const RECONNECT_DELAY = 5000;
 const POLL_INTERVAL = 2000;
 const CALL_POLL_INTERVAL = 3000;
 
-// Device-calibrated coordinates (update these for your Realme X2 Pro)
+// Device-calibrated coordinates (User provided)
 const SEND_BUTTON_X = 1000;
-const SEND_BUTTON_Y = 2200;
-const SPEAKERPHONE_X = 540;
-const SPEAKERPHONE_Y = 2100;
+const SEND_BUTTON_Y_KEYBOARD = 1387; // When keyboard is visible
+const SEND_BUTTON_Y_NO_KEYBOARD = 2313; // When keyboard is not visible
+const SPEAKERPHONE_X = 674;
+const SPEAKERPHONE_Y = 1844;
 
 let ws;
 let reconnecting = false;
@@ -199,8 +200,12 @@ async function sendWhatsAppMessage(recipient, text) {
   // Wait for WhatsApp to load the chat
   await sleep(3000);
 
-  // Tap the send button (coordinates — calibrate for your device)
-  sh(`input tap ${SEND_BUTTON_X} ${SEND_BUTTON_Y}`);
+  // The Send button replaces the Voice Record button when text is prefilled.
+  // Since the keyboard might auto-open or stay hidden depending on the OS,
+  // we tap both possible locations to guarantee the send button is pressed.
+  sh(`input tap ${SEND_BUTTON_X} ${SEND_BUTTON_Y_NO_KEYBOARD}`); // Tap where it is without keyboard
+  await sleep(500);
+  sh(`input tap ${SEND_BUTTON_X} ${SEND_BUTTON_Y_KEYBOARD}`); // Tap where it is with keyboard
 
   console.log(`[Phone] Message sent to ${recipient}`);
 }
