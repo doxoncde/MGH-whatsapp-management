@@ -85,9 +85,9 @@ async function sleep(ms) {
 
 function sh(cmd) {
   try {
-    // Use root shell (Magisk su) for privileged commands
+    // Use sudo (tsu) to preserve Termux namespace and environment
     console.log(`[Phone] Running: ${cmd}`);
-    return execSync(`su -c '${cmd}'`, { timeout: 10000, encoding: 'utf8' });
+    return execSync(`sudo ${cmd}`, { timeout: 10000, encoding: 'utf8' });
   } catch (e) {
     console.error(`[Phone] Command failed: ${cmd} — ${e.message}`);
     if (e.stdout) console.error(`[Phone] stdout: ${e.stdout}`);
@@ -149,13 +149,13 @@ async function executeCommand(cmd) {
         }
         const filepath = cmd.payload.filepath || '/data/local/tmp/mgh-greeting.wav';
         // Note: 'Incall_Music_2 Audio Mixer MultiMedia1' is a BOOL 2 (Stereo) control, so we must pass two values (1 1)
-        sh('/data/data/com.termux/files/usr/bin/tinymix "Incall_Music_2 Audio Mixer MultiMedia1" 1 1');
+        sh('tinymix "Incall_Music_2 Audio Mixer MultiMedia1" 1 1');
         // If Incall_Music_2 fails, try the alternative Incall_Music
-        // sh('/data/data/com.termux/files/usr/bin/tinymix "Incall_Music Audio Mixer MultiMedia1" 1 1');
+        // sh('tinymix "Incall_Music Audio Mixer MultiMedia1" 1 1');
         
-        sh(`/data/data/com.termux/files/usr/bin/tinyplay ${filepath}`);
+        sh(`tinyplay ${filepath}`);
         
-        sh('/data/data/com.termux/files/usr/bin/tinymix "Incall_Music_2 Audio Mixer MultiMedia1" 0 0');
+        sh('tinymix "Incall_Music_2 Audio Mixer MultiMedia1" 0 0');
         console.log(`[Phone] Audio played to caller: ${filepath}`);
         break;
 
