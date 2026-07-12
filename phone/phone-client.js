@@ -88,7 +88,9 @@ function sh(cmd) {
     console.log(`[Phone] Running: ${cmd}`);
     return execSync(`su -c '${cmd}'`, { timeout: 10000, encoding: 'utf8' });
   } catch (e) {
-    console.log(`[Phone] Command failed: ${cmd} — ${e.message}`);
+    console.error(`[Phone] Command failed: ${cmd} — ${e.message}`);
+    if (e.stdout) console.error(`[Phone] stdout: ${e.stdout}`);
+    if (e.stderr) console.error(`[Phone] stderr: ${e.stderr}`);
     return '';
   }
 }
@@ -139,28 +141,32 @@ async function executeCommand(cmd) {
         break;
 
       case 'play_audio_uplink':
-        // Inject audio file into call uplink via ALSA
+        // Inject audio into call uplink via ALSA
+        // Uses Incall_Music_2 variant (present on SD855+ PixelOS kernel)
         if (!callInProgress) {
           return { status: 'error', error: 'No active call' };
         }
         const filepath = cmd.payload.filepath || '/data/local/tmp/mgh-greeting.wav';
-        sh("tinymix 'Incall_Music Audio Mixer MultiMedia1' 1");
-        sh(`tinyplay ${filepath}`);
-        sh("tinymix 'Incall_Music Audio Mixer MultiMedia1' 0");
+        // Note: 'Incall_Music_2 Audio Mixer MultiMedia1' is a BOOL 2 (Stereo) control, so we must pass two values (1 1)
+        sh('/data/local/tmp/tinymix "Incall_Music_2 Audio Mixer MultiMedia1" 1 1');
+        // If Incall_Music_2 fails, try the alternative Incall_Music
+        // sh('/data/local/tmp/tinymix "Incall_Music Audio Mixer MultiMedia1" 1 1');
+        
+        sh(`/data/local/tmp/tinyplay ${filepath}`);
+        
+        sh('/data/local/tmp/tinymix "Incall_Music_2 Audio Mixer MultiMedia1" 0 0');
         console.log(`[Phone] Audio played to caller: ${filepath}`);
         break;
 
       case 'ivr_sequence':
-        // Full automated IVR: answer → speakerphone → play greeting → hangup
-        console.log('[Phone] Starting IVR sequence');
-        await executeCommand({ action: 'answer_call' });
-        await sleep(1500);
-        await executeCommand({ action: 'enable_speakerphone' });
-        await sleep(800);
-        await executeCommand({ action: 'play_audio_uplink', payload: cmd.payload });
-        await sleep(1000);
-        await executeCommand({ action: 'hangup' });
-        console.log('[Phone] IVR sequence complete');
+        // Full automated IVR: answer → hangup → send WhatsApp
+        // Audio injection (tinymix) is unavailable on this kernel.
+        // Using missed-call fallback: detect call, don't answer, send WhatsApp.
+        console.log('[Phone] IVR: missed-call mode (no audio injection available)');
+        // For missed-call mode: don't answer at all.
+        // Just report the call to DO and let DO send WhatsApp after a short delay.
+        console.log('[Phone] IVR complete — WhatsApp menu will follow from DO');
+        return { status: 'ok', mode: 'missed-call' };
         break;
 
       // --- WhatsApp Send (FIXED) ---
