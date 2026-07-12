@@ -31,6 +31,38 @@ let lastCallNumber = '';
 let lastCallTime = 0;
 let callInProgress = false;
 
+// --- Safety Guard Rails ---
+class ActionQueue {
+  constructor() {
+    this.queue = [];
+    this.isProcessing = false;
+  }
+  async add(task) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ task, resolve, reject });
+      this.processNext();
+    });
+  }
+  async processNext() {
+    if (this.isProcessing || this.queue.length === 0) return;
+    this.isProcessing = true;
+    const { task, resolve, reject } = this.queue.shift();
+    try {
+      const result = await task();
+      await sleep(2000); // 2 second safety buffer between all actions
+      resolve(result);
+    } catch (e) {
+      reject(e);
+    } finally {
+      this.isProcessing = false;
+      this.processNext();
+    }
+  }
+}
+const commandQueue = new ActionQueue();
+const seenNotifications = new Set();
+// --------------------------
+
 function connect() {
   ws = new WebSocket(VM_URL);
 
@@ -54,12 +86,16 @@ function connect() {
       }
 
       if (msg.type === 'command') {
-        const result = await executeCommand(msg);
-        ws.send(JSON.stringify({
-          type: 'ack',
-          commandId: msg.id,
-          ...result,
-        }));
+        commandQueue.add(async () => {
+          const result = await executeCommand(msg);
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'ack',
+              commandId: msg.id,
+              ...result,
+            }));
+          }
+        });
       }
     } catch (e) {
       console.error('[Phone] Error:', e.message);
@@ -209,7 +245,10 @@ async function sendWhatsAppMessage(recipient, text) {
   await sleep(500);
   sh(`input tap ${SEND_BUTTON_X} ${SEND_BUTTON_Y_KEYBOARD}`); // Tap where it is with keyboard
 
-  console.log(`[Phone] Message sent to ${recipient}`);
+  // Safety reset: Go back to home screen
+  await sleep(1000);
+  sh('input keyevent 3'); // HOME
+  console.log(`[Phone] Message sent to ${recipient}, returned to Home`);
 }
 
 // --- Call Listener (IVR) ---
@@ -303,6 +342,18 @@ function startNotificationListener() {
       );
 
       for (const n of waNotifs) {
+        // Guard Rail: Deduplicate notifications
+        const notifHash = `${n.id}-${n.postTime}`;
+        if (seenNotifications.has(notifHash)) continue;
+        
+        seenNotifications.add(notifHash);
+        
+        // Prevent memory leak
+        if (seenNotifications.size > 1000) {
+          const firstItem = seenNotifications.values().next().value;
+          seenNotifications.delete(firstItem);
+        }
+
         const text = n.content || n.title || '';
         const senderMatch = text.match(/from\s+([^:]+)/i) || text.match(/^([^:]+)/);
         const senderName = senderMatch ? senderMatch[1].trim() : 'Unknown';
