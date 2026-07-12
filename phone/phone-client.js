@@ -131,8 +131,8 @@ function wakeScreen() {
 }
 
 function sleepScreen() {
-  // sh('input keyevent 26'); // POWER/SLEEP
-  console.log('[Phone] Screen sleeping (DISABLED FOR TESTING)');
+  shSilentRoot('input keyevent 26'); // POWER/SLEEP
+  console.log('[Phone] Screen sleeping');
 }
 
 // -----------------------------------------------------------------
@@ -304,8 +304,7 @@ async function executeCommand(cmd) {
 
     switch (cmd.action || 'send_message') {
       case 'send_message':
-        console.log('[Phone] ⏸️ WhatsApp messaging paused during IVR testing');
-        // await sendWhatsAppMessage(recipient, text);
+        await sendWhatsAppMessage(recipient, text);
         break;
 
       case 'answer_call':
