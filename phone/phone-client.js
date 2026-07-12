@@ -229,43 +229,44 @@ async function sendWhatsAppMessage(recipient, text) {
 }
 
 // -----------------------------------------------------------------
-// IVR Call Handler — Mode B (Answer → Greet → Hang Up)
+// IVR Call Handler — Mode B (Call Already Answered → Greet → Hang Up)
+// Triggered when call transitions to OFFHOOK (state 2).
+// Phone's built-in Auto-Answer handles the actual answering.
 // -----------------------------------------------------------------
-async function handleIncomingCall(number) {
-  console.log(`[Phone] 📞 IVR triggered for: ${number}`);
+async function handleCallAnswered(number) {
+  console.log(`[Phone] 🎵 Call answered — starting IVR for: ${number}`);
   callInProgress = true;
 
+  // Wait for audio path to fully establish after answer
+  await sleep(2000);
+
+  // Step 1: Enable speakerphone so audio plays through speaker
   wakeScreen();
-  await sleep(500);
-
-  // Step 1: Auto-answer call
-  sh('input keyevent 79'); // HEADSETHOOK — answer
-  console.log('[Phone] Call answered');
-  await sleep(1500); // Give audio path time to establish
-
-  // Step 2: Enable speakerphone
+  await sleep(300);
   sh(`input tap ${SPEAKERPHONE_X} ${SPEAKERPHONE_Y}`);
-  await sleep(500);
+  console.log('[Phone] Speakerphone enabled');
+  await sleep(800);
 
-  // Step 3: Route audio uplink and play Malayalam greeting
+  // Step 2: Route audio uplink and play Malayalam greeting
   sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 1 1');
+  console.log('[Phone] 🔊 Playing greeting...');
   sh('tinyplay /data/local/tmp/mgh-greeting.wav');
   sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 0 0');
-  console.log('[Phone] 🔊 Greeting played');
+  console.log('[Phone] ✅ Greeting finished');
 
-  // Step 4: 3-second courtesy pause after greeting
+  // Step 3: 3-second courtesy pause after greeting ends
   await sleep(3000);
 
-  // Step 5: Hang up
+  // Step 4: Hang up
   sh('input keyevent 6'); // ENDCALL
   callInProgress = false;
-  console.log('[Phone] Call ended');
+  console.log('[Phone] 📴 Call ended');
 
-  // Step 6: Sleep screen
+  // Step 5: Sleep screen
   await sleep(500);
   sleepScreen();
 
-  // Step 7: Notify Cloudflare — it will respond with a send_message command
+  // Step 6: Notify Cloudflare — it will send a WhatsApp message to the caller
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: 'call_completed',
@@ -348,17 +349,29 @@ function startCallListener() {
       const incomingNumber = numberMatch ? numberMatch[1] : '';
 
       if (lastCallState === 0 && callState === 1) {
-        // IDLE → RINGING: new incoming call
+        // IDLE → RINGING: record number, notify Cloudflare
         if (incomingNumber && !isDuplicateCall(incomingNumber)) {
           lastCallNumber = incomingNumber;
           lastCallTime = Date.now();
-          console.log(`[Phone] 📞 Incoming call from: ${incomingNumber}`);
-          // Queue IVR so it doesn't conflict with other running actions
-          commandQueue.add(() => handleIncomingCall(incomingNumber));
+          console.log(`[Phone] 📞 Ringing from: ${incomingNumber} — waiting for answer...`);
+          // Notify Cloudflare about incoming call (for logging/CRM)
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'incoming_call',
+              payload: { number: incomingNumber, timestamp: Date.now() },
+            }));
+          }
+        }
+      } else if (lastCallState === 1 && callState === 2) {
+        // RINGING → OFFHOOK: call was answered (by auto-answer or user)
+        if (lastCallNumber && !callInProgress) {
+          console.log(`[Phone] ✅ Call answered — triggering IVR audio for: ${lastCallNumber}`);
+          commandQueue.add(() => handleCallAnswered(lastCallNumber));
         }
       } else if (callState === 0 && lastCallState !== 0) {
-        // → IDLE: call ended externally
+        // → IDLE: call ended externally (caller hung up before audio)
         callInProgress = false;
+        console.log('[Phone] 📴 Call ended externally');
       }
 
       lastCallState = callState;
