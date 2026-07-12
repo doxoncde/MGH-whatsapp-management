@@ -98,7 +98,11 @@ function sh(cmd) {
 
 function shNoRoot(cmd) {
   try {
-    return execSync(cmd, { timeout: 5000, encoding: 'utf8' });
+    // Add Android system bins to PATH so termux can find dumpsys, am, etc.
+    const customEnv = Object.assign({}, process.env, { 
+      PATH: '/system/bin:/system/xbin:' + (process.env.PATH || '') 
+    });
+    return execSync(cmd, { timeout: 5000, encoding: 'utf8', env: customEnv });
   } catch (e) {
     return '';
   }
