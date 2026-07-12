@@ -148,14 +148,12 @@ async function executeCommand(cmd) {
           return { status: 'error', error: 'No active call' };
         }
         const filepath = cmd.payload.filepath || '/data/local/tmp/mgh-greeting.wav';
-        // Note: 'Incall_Music_2 Audio Mixer MultiMedia1' is a BOOL 2 (Stereo) control, so we must pass two values (1 1)
-        sh('tinymix set "Incall_Music_2 Audio Mixer MultiMedia1" 1 1');
-        // If Incall_Music_2 fails, try the alternative Incall_Music
-        // sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 1 1');
+        // Note: 'Incall_Music Audio Mixer MultiMedia1' is a BOOL 2 (Stereo) control, so we must pass two values (1 1)
+        sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 1 1');
         
         sh(`tinyplay ${filepath}`);
         
-        sh('tinymix set "Incall_Music_2 Audio Mixer MultiMedia1" 0 0');
+        sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 0 0');
         console.log(`[Phone] Audio played to caller: ${filepath}`);
         break;
 
