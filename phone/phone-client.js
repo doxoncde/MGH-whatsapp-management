@@ -355,7 +355,7 @@ function startCallListener() {
       if (!stateMatch) return;
 
       const callState = parseInt(stateMatch[1]);
-      const incomingNumber = numberMatch ? numberMatch[1] : '';
+      const incomingNumber = (numberMatch && numberMatch[1]) ? numberMatch[1] : 'Unknown';
 
       if (lastCallState === 0 && callState === 1) {
         // IDLE → RINGING: record number, notify Cloudflare
