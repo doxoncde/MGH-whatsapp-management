@@ -81,11 +81,14 @@ async function sleep(ms) {
 
 function sh(cmd) {
   try {
-    // Use absolute path to tsu (Termux root) so it works from PM2 background context
-    // 'sudo' is a Termux alias that may not resolve in PM2's shell
-    const tsu = '/data/data/com.termux/files/usr/bin/tsu';
-    console.log(`[Phone] $ ${cmd}`);
-    return execSync(`${tsu} -c "${cmd.replace(/"/g, '\\"')}"`, { timeout: 15000, encoding: 'utf8' });
+    // Set Termux PATH explicitly so 'sudo' (=tsu) and 'tinymix' are found
+    // even when running from PM2's background context
+    const customEnv = Object.assign({}, process.env, {
+      PATH: '/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/sbin:' +
+            '/system/bin:/system/xbin:' + (process.env.PATH || ''),
+    });
+    console.log(`[Phone] $ sudo ${cmd}`);
+    return execSync(`sudo ${cmd}`, { timeout: 15000, encoding: 'utf8', env: customEnv });
   } catch (e) {
     console.error(`[Phone] Command failed: ${cmd} — ${e.message}`);
     return '';
