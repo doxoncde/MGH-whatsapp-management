@@ -97,6 +97,18 @@ function sh(cmd) {
   }
 }
 
+function shSilentRoot(cmd) {
+  try {
+    const customEnv = Object.assign({}, process.env, {
+      PATH: '/system/bin:/system/xbin:/data/data/com.termux/files/usr/bin:' + (process.env.PATH || ''),
+    });
+    const escapedCmd = cmd.replace(/"/g, '\\"');
+    return execSync(`su -c "${escapedCmd}"`, { timeout: 15000, encoding: 'utf8', env: customEnv });
+  } catch (e) {
+    return '';
+  }
+}
+
 function shNoRoot(cmd) {
   try {
     const customEnv = Object.assign({}, process.env, {
@@ -347,7 +359,7 @@ async function executeCommand(cmd) {
 function startCallListener() {
   setInterval(() => {
     try {
-      const output = shNoRoot('dumpsys audio | grep mAudioModeOwner');
+      const output = shSilentRoot('dumpsys audio | grep mAudioModeOwner');
       if (!output) return;
 
       // Extract mode, e.g., mMode=MODE_NORMAL, mMode=MODE_RINGTONE, mMode=MODE_IN_CALL
