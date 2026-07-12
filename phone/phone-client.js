@@ -354,47 +354,46 @@ async function executeCommand(cmd) {
 }
 
 // -----------------------------------------------------------------
-// Call State Listener (Using Audio Mode for Custom ROM Compatibility)
+// Call State Listener (Auto-Answer Enabled)
 // -----------------------------------------------------------------
 function startCallListener() {
   setInterval(() => {
     try {
-      const output = shSilentRoot('dumpsys audio | grep mAudioModeOwner');
+      const output = shSilentRoot('dumpsys telephony.registry | grep -E "mCallState|mCallIncomingNumber"');
       if (!output) return;
 
-      // Extract mode, e.g., mMode=MODE_NORMAL, mMode=MODE_RINGTONE, mMode=MODE_IN_CALL
-      const modeMatch = output.match(/mMode=([A-Z_]+)/);
-      if (!modeMatch) return;
+      const stateMatch = output.match(/mCallState=(\d+)/);
+      const numberMatch = output.match(/mCallIncomingNumber=(\+?[\d]+)/);
+      if (!stateMatch) return;
 
-      const audioMode = modeMatch[1];
-      let callState = 0; // 0=IDLE, 1=RINGING, 2=OFFHOOK
-
-      if (audioMode === 'MODE_RINGTONE') {
-        callState = 1;
-      } else if (audioMode === 'MODE_IN_CALL' || audioMode === 'MODE_IN_COMMUNICATION') {
-        callState = 2;
-      } else {
-        callState = 0;
-      }
+      const callState = parseInt(stateMatch[1]);
+      const incomingNumber = (numberMatch && numberMatch[1]) ? numberMatch[1] : 'Unknown';
 
       if (lastCallState === 0 && callState === 1) {
         // IDLE → RINGING
+        lastCallNumber = incomingNumber;
         lastCallTime = Date.now();
-        console.log(`[Phone] 📞 Ringing... waiting for answer...`);
-        // Notify Cloudflare (number unknown due to ROM restrictions)
+        console.log(`[Phone] 📞 Ringing from: ${incomingNumber}`);
+        
+        // Notify Cloudflare
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
             type: 'incoming_call',
-            payload: { number: 'Unknown', timestamp: Date.now() },
+            payload: { number: incomingNumber, timestamp: Date.now() },
           }));
         }
+
+        // AUTO-ANSWER: Wake screen and press CALL button
+        console.log('[Phone] 🤖 Auto-answering call...');
+        shSilentRoot('input keyevent 224'); // WAKE
+        setTimeout(() => shSilentRoot('input keyevent 5'), 500); // ANSWER
+        
       } else if (callState === 2 && lastCallState !== 2) {
         // ANY state → OFFHOOK: call is now live
-        // Note: We don't check lastCallTime here because some ROMs (or if phone is silent)
-        // jump directly from IDLE to OFFHOOK without ever hitting RINGTONE state.
+        const number = lastCallNumber || incomingNumber;
         if (!callInProgress) {
-          console.log(`[Phone] ✅ Call OFFHOOK — triggering IVR`);
-          commandQueue.add(() => handleCallAnswered('Unknown'));
+          console.log(`[Phone] ✅ Call OFFHOOK — triggering IVR for: ${number}`);
+          commandQueue.add(() => handleCallAnswered(number));
         }
       } else if (callState === 0 && lastCallState !== 0) {
         // → IDLE: call ended
