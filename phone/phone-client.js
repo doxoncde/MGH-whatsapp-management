@@ -81,14 +81,16 @@ async function sleep(ms) {
 
 function sh(cmd) {
   try {
-    // Set Termux PATH explicitly so 'sudo' (=tsu) and 'tinymix' are found
-    // even when running from PM2's background context
+    // PM2 loses the interactive Termux environment, causing 'sudo' (tsu) to fail
+    // silently and run commands as the normal termux user (uid 10463).
+    // We must use Magisk's 'su' directly with an explicit PATH.
     const customEnv = Object.assign({}, process.env, {
-      PATH: '/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/sbin:' +
-            '/system/bin:/system/xbin:' + (process.env.PATH || ''),
+      PATH: '/system/bin:/system/xbin:/data/data/com.termux/files/usr/bin:' + (process.env.PATH || ''),
     });
-    console.log(`[Phone] $ sudo ${cmd}`);
-    return execSync(`sudo ${cmd}`, { timeout: 15000, encoding: 'utf8', env: customEnv });
+    console.log(`[Phone] $ su -c "${cmd}"`);
+    // Escape double quotes in the command since we wrap it in double quotes for su -c
+    const escapedCmd = cmd.replace(/"/g, '\\"');
+    return execSync(`su -c "${escapedCmd}"`, { timeout: 15000, encoding: 'utf8', env: customEnv });
   } catch (e) {
     console.error(`[Phone] Command failed: ${cmd} — ${e.message}`);
     return '';
