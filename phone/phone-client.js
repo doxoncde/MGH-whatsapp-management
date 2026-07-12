@@ -513,6 +513,16 @@ function connect() {
 // -----------------------------------------------------------------
 console.log('[Phone] Starting MGH Phone Client (Rooted)');
 console.log('[Phone] VM URL:', VM_URL);
+
+// Acquire wake lock to prevent Termux from being killed when phone sleeps
+try {
+  console.log('[Phone] Acquiring Termux Wake Lock...');
+  execSync('termux-wake-lock');
+  console.log('[Phone] Wake Lock acquired ✅');
+} catch (e) {
+  console.error('[Phone] Failed to acquire Wake Lock:', e.message);
+}
+
 connect();
 startNotificationListener();
 startCallListener();
