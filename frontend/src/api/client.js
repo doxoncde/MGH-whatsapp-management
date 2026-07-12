@@ -1,5 +1,7 @@
-const API_BASE = '/api';
-const TOKEN = new URLSearchParams(window.location.search).get('token') || 'mgh-dashboard-secret-token-change-me';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+const TOKEN = new URLSearchParams(window.location.search).get('token')
+  || localStorage.getItem('mgh_token')
+  || 'mgh-dashboard-razi1811-token-change-me';
 
 async function apiFetch(path, options = {}) {
   const url = `${API_BASE}${path}`;
