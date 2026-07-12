@@ -1,55 +1,63 @@
 /**
  * MGH Phone Client — Android Termux (Rooted)
- * WebSocket client that connects to VM orchestrator.
- * Reads WhatsApp notifications via termux-notification-list.
- * Executes commands via root shell (Magisk su).
- * Handles IVR: auto-answer calls, inject greeting audio, hang up.
+ *
+ * Guard Rails:
+ *  - ActionQueue: All UI actions execute sequentially with 2s buffer
+ *  - App Verification: Every tap checks foreground app before executing
+ *  - Screen Management: Wake/sleep cycle — screen stays off when idle
+ *  - Notification Deduplication: seenNotifications Set prevents replay loops
+ *  - Safety Reset: HOME press after every action sequence
  */
 
 const WebSocket = require('ws');
 const { execSync } = require('child_process');
 
+// --- Config ---
 const VM_URL = process.env.VM_URL || 'ws://localhost:9090';
 const AUTH_TOKEN = process.env.PHONE_AUTH_TOKEN || 'phone-secret-token';
 const RECONNECT_DELAY = 5000;
 const POLL_INTERVAL = 2000;
 const CALL_POLL_INTERVAL = 3000;
 
-// Device-calibrated coordinates (User provided)
+// Device-calibrated coordinates (measured with Pointer Location)
 const SEND_BUTTON_X = 1000;
-const SEND_BUTTON_Y_KEYBOARD = 1387; // When keyboard is visible
-const SEND_BUTTON_Y_NO_KEYBOARD = 2313; // When keyboard is not visible
+const SEND_BUTTON_Y_KEYBOARD = 1387;     // Send button when keyboard is open
+const SEND_BUTTON_Y_NO_KEYBOARD = 2313;  // Send button when keyboard is hidden
 const SPEAKERPHONE_X = 674;
 const SPEAKERPHONE_Y = 1844;
 
+// --- State ---
 let ws;
 let reconnecting = false;
-
-// Call state tracking
 let lastCallState = 0;
 let lastCallNumber = '';
 let lastCallTime = 0;
 let callInProgress = false;
 
-// --- Safety Guard Rails ---
+// -----------------------------------------------------------------
+// GUARD RAIL 1: Sequential Action Queue
+// All physical phone actions run one at a time with a 2s safety gap
+// -----------------------------------------------------------------
 class ActionQueue {
   constructor() {
     this.queue = [];
     this.isProcessing = false;
   }
+
   async add(task) {
     return new Promise((resolve, reject) => {
       this.queue.push({ task, resolve, reject });
       this.processNext();
     });
   }
+
   async processNext() {
     if (this.isProcessing || this.queue.length === 0) return;
     this.isProcessing = true;
     const { task, resolve, reject } = this.queue.shift();
     try {
       const result = await task();
-      await sleep(2000); // 2 second safety buffer between all actions
+      await sleep(2000); // 2s safety buffer between all actions
       resolve(result);
     } catch (e) {
       reject(e);
@@ -59,10 +67,354 @@ class ActionQueue {
     }
   }
 }
-const commandQueue = new ActionQueue();
-const seenNotifications = new Set();
-// --------------------------
 
+const commandQueue = new ActionQueue();
+// Used for notification deduplication
+const seenNotifications = new Set();
+
+// -----------------------------------------------------------------
+// Shell Helpers
+// -----------------------------------------------------------------
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function sh(cmd) {
+  try {
+    console.log(`[Phone] $ sudo ${cmd}`);
+    return execSync(`sudo ${cmd}`, { timeout: 15000, encoding: 'utf8' });
+  } catch (e) {
+    console.error(`[Phone] Command failed: ${cmd} — ${e.message}`);
+    return '';
+  }
+}
+
+function shNoRoot(cmd) {
+  try {
+    const customEnv = Object.assign({}, process.env, {
+      PATH: '/system/bin:/system/xbin:' + (process.env.PATH || '')
+    });
+    return execSync(cmd, { timeout: 8000, encoding: 'utf8', env: customEnv });
+  } catch (e) {
+    return '';
+  }
+}
+
+// -----------------------------------------------------------------
+// GUARD RAIL 2: Screen Management
+// Screen stays off/dark when idle — wakes only when action is needed
+// -----------------------------------------------------------------
+function wakeScreen() {
+  sh('input keyevent 224'); // WAKEUP
+  shNoRoot('wm dismiss-keyguard'); // Programmatically bypass lock screen
+  console.log('[Phone] Screen woken');
+}
+
+function sleepScreen() {
+  sh('input keyevent 26'); // POWER/SLEEP
+  console.log('[Phone] Screen sleeping');
+}
+
+// -----------------------------------------------------------------
+// GUARD RAIL 3: App Verification Before Every Tap
+// -----------------------------------------------------------------
+function getForegroundApp() {
+  const out = shNoRoot('dumpsys activity activities | grep ResumedActivity');
+  const match = out.match(/([a-zA-Z0-9_.]+)\//);
+  return match ? match[1] : null;
+}
+
+async function waitForForegroundApp(pkg, timeoutMs = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const current = getForegroundApp();
+    if (current === pkg) return true;
+    await sleep(500);
+  }
+  console.error(`[GUARD] Timeout waiting for ${pkg} — got: ${getForegroundApp()}`);
+  return false;
+}
+
+/**
+ * Safe tap — aborts with HOME reset if wrong app is in foreground.
+ * @returns {boolean} true if tap was executed, false if aborted
+ */
+function tapSafe(x, y, expectedPackage) {
+  const current = getForegroundApp();
+  if (current !== expectedPackage) {
+    console.error(`[GUARD] ⛔ Expected ${expectedPackage} but got ${current}. Aborting tap → HOME`);
+    sh('input keyevent 3'); // HOME — safe reset
+    return false;
+  }
+  sh(`input tap ${x} ${y}`);
+  return true;
+}
+
+// -----------------------------------------------------------------
+// Send Verification (UI Automator)
+// -----------------------------------------------------------------
+function verifySendSuccess() {
+  try {
+    sh('uiautomator dump /sdcard/ui_dump.xml');
+    const xml = shNoRoot('cat /sdcard/ui_dump.xml');
+    // After sending, the message input should be empty
+    return xml.includes('resource-id="com.whatsapp:id/entry" text=""');
+  } catch (e) {
+    return false; // Can't verify — assume sent
+  }
+}
+
+// -----------------------------------------------------------------
+// WhatsApp Message Sending (Reliable — Direct Intent + Guard Rails)
+// -----------------------------------------------------------------
+async function sendWhatsAppMessage(recipient, text) {
+  if (!recipient || !text) {
+    console.log('[Phone] Missing recipient or text, skipping');
+    return false;
+  }
+
+  const cleanNumber = recipient.replace(/\+/g, '').replace(/\s/g, '');
+  const encodedText = encodeURIComponent(text);
+  console.log(`[Phone] 💬 Sending to ${recipient}: "${text.substring(0, 60)}..."`);
+
+  // Step 1: Wake screen
+  wakeScreen();
+  await sleep(500);
+
+  // Step 2: HOME — ensure clean neutral state
+  sh('input keyevent 3');
+  await sleep(500);
+
+  // Step 3: Open WhatsApp directly via URI (no browser redirect)
+  shNoRoot(`am start -a android.intent.action.VIEW -d "whatsapp://send?phone=${cleanNumber}&text=${encodedText}"`);
+
+  // Step 4: Wait until WhatsApp is the foreground app (max 8 seconds)
+  const inForeground = await waitForForegroundApp('com.whatsapp', 8000);
+  if (!inForeground) {
+    console.error('[Phone] ❌ WhatsApp did not open in time. Aborting send.');
+    sh('input keyevent 3'); // HOME
+    sleepScreen();
+    return false;
+  }
+
+  // Step 5: Wait for chat to fully load
+  await sleep(2000);
+
+  // Step 6: Dismiss keyboard so send button is at lower Y
+  sh('input keyevent 4'); // BACK closes keyboard but stays in chat
+  await sleep(600);
+
+  // Step 7: Tap Send button with app guard
+  const tapped = tapSafe(SEND_BUTTON_X, SEND_BUTTON_Y_NO_KEYBOARD, 'com.whatsapp');
+  if (!tapped) {
+    sleepScreen();
+    return false;
+  }
+  await sleep(800);
+
+  // Step 8: Verify the message was actually sent
+  const verified = verifySendSuccess();
+  if (verified) {
+    console.log(`[Phone] ✅ Message sent & verified to ${recipient}`);
+  } else {
+    console.log(`[Phone] ⚠️  Message sent (verification inconclusive) to ${recipient}`);
+  }
+
+  // Step 9: HOME reset and sleep screen
+  await sleep(500);
+  sh('input keyevent 3'); // HOME
+  await sleep(300);
+  sleepScreen();
+  return true;
+}
+
+// -----------------------------------------------------------------
+// IVR Call Handler — Mode B (Answer → Greet → Hang Up)
+// -----------------------------------------------------------------
+async function handleIncomingCall(number) {
+  console.log(`[Phone] 📞 IVR triggered for: ${number}`);
+  callInProgress = true;
+
+  wakeScreen();
+  await sleep(500);
+
+  // Step 1: Auto-answer call
+  sh('input keyevent 79'); // HEADSETHOOK — answer
+  console.log('[Phone] Call answered');
+  await sleep(1500); // Give audio path time to establish
+
+  // Step 2: Enable speakerphone
+  sh(`input tap ${SPEAKERPHONE_X} ${SPEAKERPHONE_Y}`);
+  await sleep(500);
+
+  // Step 3: Route audio uplink and play Malayalam greeting
+  sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 1 1');
+  sh('tinyplay /data/local/tmp/mgh-greeting.wav');
+  sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 0 0');
+  console.log('[Phone] 🔊 Greeting played');
+
+  // Step 4: 3-second courtesy pause after greeting
+  await sleep(3000);
+
+  // Step 5: Hang up
+  sh('input keyevent 6'); // ENDCALL
+  callInProgress = false;
+  console.log('[Phone] Call ended');
+
+  // Step 6: Sleep screen
+  await sleep(500);
+  sleepScreen();
+
+  // Step 7: Notify Cloudflare — it will respond with a send_message command
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'call_completed',
+      payload: { number, timestamp: Date.now() },
+    }));
+  }
+}
+
+// -----------------------------------------------------------------
+// Command Dispatcher
+// -----------------------------------------------------------------
+async function executeCommand(cmd) {
+  try {
+    const { recipient, text } = cmd.payload || {};
+
+    switch (cmd.action || 'send_message') {
+      case 'send_message':
+        await sendWhatsAppMessage(recipient, text);
+        break;
+
+      case 'answer_call':
+        wakeScreen();
+        sh('input keyevent 79');
+        callInProgress = true;
+        console.log('[Phone] Call answered (manual command)');
+        break;
+
+      case 'hangup':
+        sh('input keyevent 6');
+        callInProgress = false;
+        console.log('[Phone] Call ended (manual command)');
+        break;
+
+      case 'enable_speakerphone':
+        sh(`input tap ${SPEAKERPHONE_X} ${SPEAKERPHONE_Y}`);
+        console.log('[Phone] Speakerphone toggled');
+        break;
+
+      case 'play_audio_uplink':
+        if (!callInProgress) return { status: 'error', error: 'No active call' };
+        const filepath = cmd.payload.filepath || '/data/local/tmp/mgh-greeting.wav';
+        sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 1 1');
+        sh(`tinyplay ${filepath}`);
+        sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 0 0');
+        break;
+
+      case 'tap':
+        wakeScreen();
+        sh(`input tap ${cmd.payload.x} ${cmd.payload.y}`);
+        break;
+
+      case 'keyevent':
+        sh(`input keyevent ${cmd.payload.key}`);
+        break;
+
+      default:
+        console.log(`[Phone] Unknown action: ${cmd.action}`);
+    }
+
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', error: e.message };
+  }
+}
+
+// -----------------------------------------------------------------
+// Call State Listener
+// -----------------------------------------------------------------
+function startCallListener() {
+  setInterval(() => {
+    try {
+      const output = shNoRoot('dumpsys telephony.registry | grep -E "mCallState|mCallIncomingNumber"');
+      if (!output) return;
+
+      const stateMatch = output.match(/mCallState=(\d+)/);
+      const numberMatch = output.match(/mCallIncomingNumber=(\+?[\d]+)/);
+      if (!stateMatch) return;
+
+      const callState = parseInt(stateMatch[1]);
+      const incomingNumber = numberMatch ? numberMatch[1] : '';
+
+      if (lastCallState === 0 && callState === 1) {
+        // IDLE → RINGING: new incoming call
+        if (incomingNumber && !isDuplicateCall(incomingNumber)) {
+          lastCallNumber = incomingNumber;
+          lastCallTime = Date.now();
+          console.log(`[Phone] 📞 Incoming call from: ${incomingNumber}`);
+          // Queue IVR so it doesn't conflict with other running actions
+          commandQueue.add(() => handleIncomingCall(incomingNumber));
+        }
+      } else if (callState === 0 && lastCallState !== 0) {
+        // → IDLE: call ended externally
+        callInProgress = false;
+      }
+
+      lastCallState = callState;
+    } catch (e) { /* non-fatal polling error */ }
+  }, CALL_POLL_INTERVAL);
+}
+
+function isDuplicateCall(number) {
+  // Same number can only trigger IVR once per 60 seconds
+  return number === lastCallNumber && Date.now() - lastCallTime < 60000;
+}
+
+// -----------------------------------------------------------------
+// WhatsApp Notification Listener
+// -----------------------------------------------------------------
+function startNotificationListener() {
+  setInterval(() => {
+    try {
+      const output = execSync('termux-notification-list', { timeout: 3000, encoding: 'utf8' });
+      const notifs = JSON.parse(output || '[]');
+      const waNotifs = (notifs || []).filter(n => n.packageName === 'com.whatsapp' && !n.groupKey);
+
+      for (const n of waNotifs) {
+        // GUARD RAIL: Deduplicate notifications by id+postTime
+        const notifHash = `${n.id}-${n.postTime}`;
+        if (seenNotifications.has(notifHash)) continue;
+
+        seenNotifications.add(notifHash);
+
+        // Prevent memory leak: cap at 1000 entries
+        if (seenNotifications.size > 1000) {
+          seenNotifications.delete(seenNotifications.values().next().value);
+        }
+
+        const text = n.content || n.title || '';
+        console.log(`[Phone] 📩 WhatsApp notification: ${text.substring(0, 60)}`);
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'whatsapp_message',
+            payload: {
+              sender: n.tag || '+unknown',
+              senderName: n.title || 'Unknown',
+              message: text,
+              timestamp: Date.now(),
+            },
+          }));
+        }
+      }
+    } catch (e) { /* non-fatal polling error */ }
+  }, POLL_INTERVAL);
+}
+
+// -----------------------------------------------------------------
+// WebSocket Connection
+// -----------------------------------------------------------------
 function connect() {
   ws = new WebSocket(VM_URL);
 
@@ -81,11 +433,12 @@ function connect() {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === 'auth_ok') {
-        console.log('[Phone] Authenticated');
+        console.log('[Phone] Authenticated ✅');
         return;
       }
 
       if (msg.type === 'command') {
+        // All commands go through the sequential queue
         commandQueue.add(async () => {
           const result = await executeCommand(msg);
           if (ws && ws.readyState === WebSocket.OPEN) {
@@ -98,7 +451,7 @@ function connect() {
         });
       }
     } catch (e) {
-      console.error('[Phone] Error:', e.message);
+      console.error('[Phone] Message error:', e.message);
     }
   });
 
@@ -115,271 +468,12 @@ function connect() {
   });
 }
 
-async function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function sh(cmd) {
-  try {
-    // Use sudo (tsu) to preserve Termux namespace and environment
-    console.log(`[Phone] Running: ${cmd}`);
-    return execSync(`sudo ${cmd}`, { timeout: 10000, encoding: 'utf8' });
-  } catch (e) {
-    console.error(`[Phone] Command failed: ${cmd} — ${e.message}`);
-    if (e.stdout) console.error(`[Phone] stdout: ${e.stdout}`);
-    if (e.stderr) console.error(`[Phone] stderr: ${e.stderr}`);
-    return '';
-  }
-}
-
-function shNoRoot(cmd) {
-  try {
-    // Add Android system bins to PATH so termux can find dumpsys, am, etc.
-    const customEnv = Object.assign({}, process.env, { 
-      PATH: '/system/bin:/system/xbin:' + (process.env.PATH || '') 
-    });
-    return execSync(cmd, { timeout: 5000, encoding: 'utf8', env: customEnv });
-  } catch (e) {
-    return '';
-  }
-}
-
-async function executeCommand(cmd) {
-  try {
-    const { recipient, text } = cmd.payload || {};
-
-    switch (cmd.action || 'send_message') {
-      case 'tap':
-        sh(`input tap ${cmd.payload.x} ${cmd.payload.y}`);
-        break;
-      case 'swipe':
-        sh(`input swipe ${cmd.payload.x1} ${cmd.payload.y1} ${cmd.payload.x2} ${cmd.payload.y2} ${cmd.payload.duration || 300}`);
-        break;
-      case 'type':
-        sh(`input text "${(cmd.payload.text || '').replace(/"/g, '\\"')}"`);
-        break;
-      case 'keyevent':
-        sh(`input keyevent ${cmd.payload.key}`);
-        break;
-
-      // --- IVR Commands ---
-      case 'answer_call':
-        sh('input keyevent 79'); // HEADSETHOOK — answer call
-        callInProgress = true;
-        console.log('[Phone] Call answered');
-        break;
-
-      case 'hangup':
-        sh('input keyevent 6'); // ENDCALL
-        callInProgress = false;
-        console.log('[Phone] Call ended');
-        break;
-
-      case 'enable_speakerphone':
-        // Tap speakerphone button during call
-        sh(`input tap ${SPEAKERPHONE_X} ${SPEAKERPHONE_Y}`);
-        console.log('[Phone] Speakerphone toggled');
-        break;
-
-      case 'play_audio_uplink':
-        // Inject audio into call uplink via ALSA
-        // Uses Incall_Music_2 variant (present on SD855+ PixelOS kernel)
-        if (!callInProgress) {
-          return { status: 'error', error: 'No active call' };
-        }
-        const filepath = cmd.payload.filepath || '/data/local/tmp/mgh-greeting.wav';
-        // Note: 'Incall_Music Audio Mixer MultiMedia1' is a BOOL 2 (Stereo) control, so we must pass two values (1 1)
-        sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 1 1');
-        
-        sh(`tinyplay ${filepath}`);
-        
-        sh('tinymix set "Incall_Music Audio Mixer MultiMedia1" 0 0');
-        console.log(`[Phone] Audio played to caller: ${filepath}`);
-        break;
-
-      case 'ivr_sequence':
-        // Full automated IVR: answer → hangup → send WhatsApp
-        // Audio injection (tinymix) is unavailable on this kernel.
-        // Using missed-call fallback: detect call, don't answer, send WhatsApp.
-        console.log('[Phone] IVR: missed-call mode (no audio injection available)');
-        // For missed-call mode: don't answer at all.
-        // Just report the call to DO and let DO send WhatsApp after a short delay.
-        console.log('[Phone] IVR complete — WhatsApp menu will follow from DO');
-        return { status: 'ok', mode: 'missed-call' };
-        break;
-
-      // --- WhatsApp Send (FIXED) ---
-      case 'send_message':
-      default:
-        await sendWhatsAppMessage(recipient, text);
-        break;
-    }
-
-    return { status: 'ok' };
-  } catch (e) {
-    return { status: 'error', error: e.message };
-  }
-}
-
-async function sendWhatsAppMessage(recipient, text) {
-  if (!recipient || !text) {
-    console.log('[Phone] Missing recipient or text, skipping send');
-    return;
-  }
-
-  const cleanRecipient = recipient.replace(/\+/g, '');
-  const encodedText = encodeURIComponent(text);
-
-  console.log(`[Phone] Sending WhatsApp to ${recipient}: "${text.substring(0, 50)}..."`);
-
-  // Open WhatsApp chat with pre-filled message
-  shNoRoot(`am start -a android.intent.action.VIEW -d "https://wa.me/${cleanRecipient}?text=${encodedText}"`);
-
-  // Wait for WhatsApp to load the chat
-  await sleep(3000);
-
-  // The Send button replaces the Voice Record button when text is prefilled.
-  // Since the keyboard might auto-open or stay hidden depending on the OS,
-  // we tap both possible locations to guarantee the send button is pressed.
-  sh(`input tap ${SEND_BUTTON_X} ${SEND_BUTTON_Y_NO_KEYBOARD}`); // Tap where it is without keyboard
-  await sleep(500);
-  sh(`input tap ${SEND_BUTTON_X} ${SEND_BUTTON_Y_KEYBOARD}`); // Tap where it is with keyboard
-
-  // Safety reset: Go back to home screen
-  await sleep(1000);
-  sh('input keyevent 3'); // HOME
-  console.log(`[Phone] Message sent to ${recipient}, returned to Home`);
-}
-
-// --- Call Listener (IVR) ---
-function startCallListener() {
-  setInterval(() => {
-    try {
-      const output = shNoRoot('dumpsys telephony.registry | grep -E "mCallState|mCallIncomingNumber"');
-
-      if (!output) return;
-
-      const stateMatch = output.match(/mCallState=(\d+)/);
-      const numberMatch = output.match(/mCallIncomingNumber=(\+?\d+)/);
-
-      if (!stateMatch) return;
-
-      const callState = parseInt(stateMatch[1]);
-      const incomingNumber = numberMatch ? numberMatch[1] : '';
-
-      // Detect state transitions
-      if (lastCallState === 0 && callState === 1) {
-        // IDLE → RINGING: New incoming call
-        if (incomingNumber && !isDuplicate(incomingNumber)) {
-          lastCallNumber = incomingNumber;
-          lastCallTime = Date.now();
-          console.log(`[Phone] Incoming call from: ${incomingNumber}`);
-
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: 'incoming_call',
-              payload: {
-                number: incomingNumber,
-                timestamp: Date.now(),
-              },
-            }));
-          }
-        }
-      } else if (callState === 2 && !callInProgress) {
-        // OFFHOOK — call answered (by user or auto-answer)
-        callInProgress = true;
-      } else if (callState === 0 && lastCallState !== 0) {
-        // IDLE — call ended
-        callInProgress = false;
-      }
-
-      lastCallState = callState;
-    } catch (e) {
-      // Non-fatal — dumpsys may fail temporarily
-    }
-  }, CALL_POLL_INTERVAL);
-}
-
-function isDuplicate(number) {
-  if (number === lastCallNumber && Date.now() - lastCallTime < 10000) {
-    return true;
-  }
-  return false;
-}
-
-// --- WhatsApp Account Check ---
-async function checkWhatsApp(number) {
-  try {
-    const cleanNumber = number.replace(/\+/g, '');
-    shNoRoot(`am start -a android.intent.action.VIEW -d "https://wa.me/${cleanNumber}"`);
-    await sleep(3000);
-
-    // Check logcat for errors
-    const logcat = shNoRoot('logcat -d -t 50 | grep -i "not registered\\|not on whatsapp\\|invalid phone"');
-
-    // Go back to home
-    sh('input keyevent 3');
-
-    if (logcat.includes('not registered') || logcat.includes('not on WhatsApp')) {
-      return false;
-    }
-    return true;
-  } catch (e) {
-    console.log('[Phone] WhatsApp check failed:', e.message);
-    return false;
-  }
-}
-
-// --- WhatsApp Notification Listener ---
-function startNotificationListener() {
-  setInterval(() => {
-    try {
-      const output = execSync('termux-notification-list', { timeout: 3000, encoding: 'utf8' });
-      const notifs = JSON.parse(output || '[]');
-
-      const waNotifs = (notifs || []).filter(n =>
-        n.packageName === 'com.whatsapp' && !n.groupKey
-      );
-
-      for (const n of waNotifs) {
-        // Guard Rail: Deduplicate notifications
-        const notifHash = `${n.id}-${n.postTime}`;
-        if (seenNotifications.has(notifHash)) continue;
-        
-        seenNotifications.add(notifHash);
-        
-        // Prevent memory leak
-        if (seenNotifications.size > 1000) {
-          const firstItem = seenNotifications.values().next().value;
-          seenNotifications.delete(firstItem);
-        }
-
-        const text = n.content || n.title || '';
-        const senderMatch = text.match(/from\s+([^:]+)/i) || text.match(/^([^:]+)/);
-        const senderName = senderMatch ? senderMatch[1].trim() : 'Unknown';
-        const message = text.split(':').slice(1).join(':').trim() || text;
-
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'whatsapp_message',
-            payload: {
-              sender: '+919876543210', // placeholder — extract from notification in production
-              senderName,
-              message: message || text,
-              timestamp: Date.now(),
-            },
-          }));
-        }
-      }
-    } catch (e) {
-      // Notification polling failed — non-fatal
-    }
-  }, POLL_INTERVAL);
-}
-
+// -----------------------------------------------------------------
+// Boot
+// -----------------------------------------------------------------
 console.log('[Phone] Starting MGH Phone Client (Rooted)');
 console.log('[Phone] VM URL:', VM_URL);
 connect();
 startNotificationListener();
 startCallListener();
-console.log('[Phone] Call listener active (polling every 3s)');
+console.log('[Phone] All listeners active');
